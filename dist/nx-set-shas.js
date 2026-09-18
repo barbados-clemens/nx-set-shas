@@ -22019,6 +22019,8 @@ var workflowId = getInput("workflow-id");
 var fallbackSHA = getInput("fallback-sha");
 var remote = getInput("remote");
 var usePreviousMergeGroupCommit = getBooleanInput("use-previous-merge-group-commit");
+var useGitTags = getBooleanInput("use-git-tags");
+var tagMatchPattern = getInput("tag-match-pattern") || "nx_successful_ci_run*";
 var defaultWorkingDirectory = ".";
 var BASE_SHA;
 (async () => {
@@ -22046,21 +22048,32 @@ var BASE_SHA;
     });
     BASE_SHA = baseResult.stdout;
   } else {
-    try {
-      BASE_SHA = await findSuccessfulCommit(workflowId, runId, owner, repo, mainBranchName, lastSuccessfulEvent);
-    } catch (e) {
-      setFailed(e.message);
-      return;
+    let matchingTag;
+    if (useGitTags) {
+      matchingTag = findMatchingTag(tagMatchPattern);
+      BASE_SHA = matchingTag?.sha;
+    } else {
+      try {
+        BASE_SHA = await findSuccessfulCommit(workflowId, runId, owner, repo, mainBranchName, lastSuccessfulEvent);
+      } catch (e) {
+        setFailed(e.message);
+        return;
+      }
     }
     if (!BASE_SHA) {
       if (errorOnNoSuccessfulWorkflow) {
-        reportFailure(mainBranchName);
+        reportFailure(mainBranchName, useGitTags ? tagMatchPattern : undefined);
         return;
       } else {
         process.stdout.write(`
 `);
-        process.stdout.write(`WARNING: Unable to find a successful workflow run on '${remote}/${mainBranchName}', or the latest successful workflow was connected to a commit which no longer exists on that branch (e.g. if that branch was rebased)
+        if (useGitTags) {
+          process.stdout.write(`WARNING: Unable to find a Git tag reachable from HEAD using pattern '${tagMatchPattern}'
 `);
+        } else {
+          process.stdout.write(`WARNING: Unable to find a successful workflow run on '${remote}/${mainBranchName}', or the latest successful workflow was connected to a commit which no longer exists on that branch (e.g. if that branch was rebased)
+`);
+        }
         if (fallbackSHA) {
           BASE_SHA = fallbackSHA;
           process.stdout.write(`Using provided fallback SHA: ${fallbackSHA}
@@ -22094,8 +22107,15 @@ var BASE_SHA;
     } else {
       process.stdout.write(`
 `);
-      process.stdout.write(`Found the last successful workflow run on '${remote}/${mainBranchName}'
+      if (matchingTag) {
+        process.stdout.write(`Found a Git tag reachable from HEAD matching '${tagMatchPattern}'
 `);
+        process.stdout.write(`Tag: ${matchingTag.name}
+`);
+      } else {
+        process.stdout.write(`Found the last successful workflow run on '${remote}/${mainBranchName}'
+`);
+      }
       process.stdout.write(`Commit: ${BASE_SHA}
 `);
     }
@@ -22120,7 +22140,15 @@ var BASE_SHA;
   setOutput("base", BASE_SHA);
   setOutput("head", HEAD_SHA);
 })();
-function reportFailure(branchName) {
+function reportFailure(branchName, tagPattern) {
+  if (tagPattern) {
+    setFailed(`
+    Unable to find a Git tag reachable from HEAD using pattern '${tagPattern}'
+    NOTE: You have set 'error-on-no-successful-workflow' on the action so this is a hard error.
+
+    Make sure actions/checkout fetches the full Git history and tags by setting 'fetch-depth: 0'.`);
+    return;
+  }
   setFailed(`
     Unable to find a successful workflow run on '${remote}/${branchName}'
     NOTE: You have set 'error-on-no-successful-workflow' on the action so this is a hard error.
@@ -22128,6 +22156,22 @@ function reportFailure(branchName) {
     Is it possible that you have no runs currently on '${remote}/${branchName}'?
     - If yes, then you should run the workflow without this flag first.
     - If no, then you might have changed your git history and those commits no longer exist.`);
+}
+function findMatchingTag(pattern) {
+  const tagResult = spawnSync("git", ["describe", "--tags", "--abbrev=0", `--match=${pattern}`], {
+    encoding: "utf-8"
+  });
+  if (tagResult.status !== 0 || !tagResult.stdout) {
+    return;
+  }
+  const name = tagResult.stdout.trim();
+  const commitResult = spawnSync("git", ["rev-parse", "--verify", `refs/tags/${name}^{commit}`], {
+    encoding: "utf-8"
+  });
+  if (commitResult.status !== 0 || !commitResult.stdout) {
+    return;
+  }
+  return { name, sha: commitResult.stdout.trim() };
 }
 async function findSuccessfulCommit(workflow_id, run_id, owner2, repo2, branch, lastSuccessfulEvent2) {
   const octokit = getOctokit(process.env.GITHUB_TOKEN);

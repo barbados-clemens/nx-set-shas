@@ -10,6 +10,7 @@
   "type": "module",
   "scripts": {
     "build": "bun build ./nx-set-shas.ts --outdir ./dist --target node",
+    "test": "bun test",
     "prepare": "is-ci || husky",
     "format:check": "oxfmt --check .",
     "format": "oxfmt --write ."
