@@ -22020,7 +22020,7 @@ var fallbackSHA = getInput("fallback-sha");
 var remote = getInput("remote");
 var usePreviousMergeGroupCommit = getBooleanInput("use-previous-merge-group-commit");
 var useGitTags = getBooleanInput("use-git-tags");
-var tagMatchPattern = getInput("tag-match-pattern") || "nx_successful_ci_run*";
+var tagMatchPattern = getInput("tag-match-pattern");
 var defaultWorkingDirectory = ".";
 var BASE_SHA;
 (async () => {
@@ -22049,16 +22049,16 @@ var BASE_SHA;
     BASE_SHA = baseResult.stdout;
   } else {
     let matchingTag;
-    if (useGitTags) {
-      matchingTag = findMatchingTag(tagMatchPattern);
-      BASE_SHA = matchingTag?.sha;
-    } else {
-      try {
+    try {
+      if (useGitTags) {
+        matchingTag = findMatchingTag(tagMatchPattern);
+        BASE_SHA = matchingTag?.sha;
+      } else {
         BASE_SHA = await findSuccessfulCommit(workflowId, runId, owner, repo, mainBranchName, lastSuccessfulEvent);
-      } catch (e) {
-        setFailed(e.message);
-        return;
       }
+    } catch (e) {
+      setFailed(e instanceof Error ? e.message : String(e));
+      return;
     }
     if (!BASE_SHA) {
       if (errorOnNoSuccessfulWorkflow) {
@@ -22079,19 +22079,20 @@ var BASE_SHA;
           process.stdout.write(`Using provided fallback SHA: ${fallbackSHA}
 `);
         } else {
-          const LAST_COMMIT_CMD = `${remote}/${mainBranchName}~1`;
-          const baseRes = spawnSync("git", ["rev-parse", LAST_COMMIT_CMD], {
+          const previousCommit = useGitTags ? "HEAD~1" : `${remote}/${mainBranchName}~1`;
+          const baseRes = spawnSync("git", ["rev-parse", previousCommit], {
             encoding: "utf-8"
           });
           if (baseRes.status !== 0 || !baseRes.stdout) {
-            const emptyTreeRes = spawnSync("git", ["hash-object", "-t", "tree", "/dev/null"], {
-              encoding: "utf-8"
+            const emptyTreeRes = spawnSync("git", ["hash-object", "-t", "tree", "--stdin"], {
+              encoding: "utf-8",
+              input: ""
             });
-            BASE_SHA = emptyTreeRes.stdout ?? `4b825dc642cb6eb9a060e54bf8d69288fbee4904`;
+            BASE_SHA = emptyTreeRes.stdout || `4b825dc642cb6eb9a060e54bf8d69288fbee4904`;
             process.stdout.write(`HEAD~1 does not exist. We are therefore defaulting to use the empty git tree hash as BASE.
 `);
           } else {
-            process.stdout.write(`We are therefore defaulting to use HEAD~1 on '${remote}/${mainBranchName}'
+            process.stdout.write(`We are therefore defaulting to use '${previousCommit}'
 `);
             BASE_SHA = baseRes.stdout;
           }
@@ -22158,20 +22159,31 @@ function reportFailure(branchName, tagPattern) {
     - If no, then you might have changed your git history and those commits no longer exist.`);
 }
 function findMatchingTag(pattern) {
-  const tagResult = spawnSync("git", ["describe", "--tags", "--abbrev=0", `--match=${pattern}`], {
+  const matchingTagsResult = spawnSync("git", ["tag", "--merged=HEAD", "--list", "--", pattern], {
     encoding: "utf-8"
   });
-  if (tagResult.status !== 0 || !tagResult.stdout) {
+  if (matchingTagsResult.status !== 0) {
+    throw gitCommandError("git tag", matchingTagsResult);
+  }
+  if (!matchingTagsResult.stdout) {
     return;
+  }
+  const tagResult = spawnSync("git", ["describe", "--tags", "--abbrev=0", "--candidates=2147483647", `--match=${pattern}`, "HEAD"], { encoding: "utf-8" });
+  if (tagResult.status !== 0 || !tagResult.stdout) {
+    throw gitCommandError("git describe", tagResult);
   }
   const name = tagResult.stdout.trim();
   const commitResult = spawnSync("git", ["rev-parse", "--verify", `refs/tags/${name}^{commit}`], {
     encoding: "utf-8"
   });
   if (commitResult.status !== 0 || !commitResult.stdout) {
-    return;
+    throw gitCommandError("git rev-parse", commitResult);
   }
   return { name, sha: commitResult.stdout.trim() };
+}
+function gitCommandError(command, result) {
+  const detail = result.error?.message || result.stderr?.trim() || `exited with status ${result.status}`;
+  return new Error(`${command} failed: ${detail}`);
 }
 async function findSuccessfulCommit(workflow_id, run_id, owner2, repo2, branch, lastSuccessfulEvent2) {
   const octokit = getOctokit(process.env.GITHUB_TOKEN);

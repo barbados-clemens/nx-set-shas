@@ -41,11 +41,8 @@ jobs:
       - name: Install
         run: bun install
 
-      - name: Compile
-        run: bun run build
-
       - name: Test Git tag matching
-        run: bun test
+        run: bun run test
 
       - name: Test default PR Workflow
         if: github.event_name == 'pull_request'

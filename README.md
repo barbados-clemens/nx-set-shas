@@ -156,7 +156,7 @@ Set `use-git-tags` to `true` to use a Git tag as the base for non-PR workflows. 
 
 The default pattern matches tags created for version 1 by the complementary [`nrwl/nx-tag-successful-ci-run`](https://github.com/nrwl/nx-tag-successful-ci-run) action. This action only reads tags. It does not create or push them.
 
-Pull request workflows continue to use the PR merge base. Merge-group workflows continue to use the previous group commit when `use-previous-merge-group-commit` is enabled.
+Unmerged pull request workflows continue to use the PR merge base. Merge-group workflows continue to use the previous group commit when `use-previous-merge-group-commit` is enabled.
 
 If no tag matches, `fallback-sha`, `error-on-no-successful-workflow`, and the existing `HEAD~1` fallback work as usual. The tag lookup does not require the Actions API permissions described below.
 

@@ -51,6 +51,38 @@ test('uses the configured fallback when no Git tag matches', () => {
   expect(result.outputs.noPreviousBuild).toBe('true');
 });
 
+test('uses the HEAD parent when no Git tag matches', () => {
+  const repository = createRepository();
+  commit(repository, 'first');
+  const mainHead = commit(repository, 'main head');
+  git(repository, ['update-ref', 'refs/remotes/origin/main', mainHead]);
+  const expectedBase = commit(repository, 'feature parent');
+  const expectedHead = commit(repository, 'head');
+
+  const result = runAction(repository, {
+    'error-on-no-successful-workflow': 'false',
+    'tag-match-pattern': 'missing-*',
+  });
+
+  expect(result.status).toBe(0);
+  expect(result.outputs.base).toBe(expectedBase);
+  expect(result.outputs.head).toBe(expectedHead);
+});
+
+test('uses the empty tree when no previous commit exists', () => {
+  const repository = createRepository();
+  const expectedHead = commit(repository, 'head');
+
+  const result = runAction(repository, {
+    'error-on-no-successful-workflow': 'false',
+    'tag-match-pattern': 'missing-*',
+  });
+
+  expect(result.status).toBe(0);
+  expect(result.outputs.base).toBe('4b825dc642cb6eb9a060e54bf8d69288fbee4904');
+  expect(result.outputs.head).toBe(expectedHead);
+});
+
 test('fails when no Git tag matches and hard errors are enabled', () => {
   const repository = createRepository();
   commit(repository, 'head');
@@ -65,12 +97,25 @@ test('fails when no Git tag matches and hard errors are enabled', () => {
   );
 });
 
+test('fails when Git cannot inspect matching tags', () => {
+  const repository = createRepository();
+  commit(repository, 'head');
+  git(repository, ['config', 'core.repositoryformatversion', '999']);
+
+  const result = runAction(repository, {});
+
+  expect(result.status).toBe(1);
+  expect(result.stdout).toContain('git tag failed:');
+});
+
 function createRepository(): string {
   const repository = mkdtempSync(join(tmpdir(), 'nx-set-shas-'));
   temporaryDirectories.push(repository);
   git(repository, ['init', '--initial-branch=main']);
   git(repository, ['config', 'user.name', 'Nx Set SHAs']);
   git(repository, ['config', 'user.email', 'nx-set-shas@example.com']);
+  git(repository, ['config', 'commit.gpgSign', 'false']);
+  git(repository, ['config', 'tag.gpgSign', 'false']);
   return repository;
 }
 

@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { GitHub } from '@actions/github/lib/utils';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { existsSync } from 'node:fs';
 
 const {
@@ -19,7 +19,7 @@ const fallbackSHA = core.getInput('fallback-sha');
 const remote = core.getInput('remote');
 const usePreviousMergeGroupCommit = core.getBooleanInput('use-previous-merge-group-commit');
 const useGitTags = core.getBooleanInput('use-git-tags');
-const tagMatchPattern = core.getInput('tag-match-pattern') || 'nx_successful_ci_run*';
+const tagMatchPattern = core.getInput('tag-match-pattern');
 const defaultWorkingDirectory = '.';
 
 let BASE_SHA: string;
@@ -58,11 +58,11 @@ let BASE_SHA: string;
     BASE_SHA = baseResult.stdout;
   } else {
     let matchingTag: MatchingTag | undefined;
-    if (useGitTags) {
-      matchingTag = findMatchingTag(tagMatchPattern);
-      BASE_SHA = matchingTag?.sha;
-    } else {
-      try {
+    try {
+      if (useGitTags) {
+        matchingTag = findMatchingTag(tagMatchPattern);
+        BASE_SHA = matchingTag?.sha;
+      } else {
         BASE_SHA = await findSuccessfulCommit(
           workflowId,
           runId,
@@ -71,10 +71,10 @@ let BASE_SHA: string;
           mainBranchName,
           lastSuccessfulEvent,
         );
-      } catch (e) {
-        core.setFailed(e.message);
-        return;
       }
+    } catch (e) {
+      core.setFailed(e instanceof Error ? e.message : String(e));
+      return;
     }
 
     if (!BASE_SHA) {
@@ -96,26 +96,25 @@ let BASE_SHA: string;
           BASE_SHA = fallbackSHA;
           process.stdout.write(`Using provided fallback SHA: ${fallbackSHA}\n`);
         } else {
-          // Check if HEAD~1 exists, and if not, set BASE_SHA to the empty tree hash
-          const LAST_COMMIT_CMD = `${remote}/${mainBranchName}~1`;
+          // Check if the previous commit exists, and if not, set BASE_SHA to the empty tree hash
+          const previousCommit = useGitTags ? 'HEAD~1' : `${remote}/${mainBranchName}~1`;
 
-          const baseRes = spawnSync('git', ['rev-parse', LAST_COMMIT_CMD], {
+          const baseRes = spawnSync('git', ['rev-parse', previousCommit], {
             encoding: 'utf-8',
           });
 
           if (baseRes.status !== 0 || !baseRes.stdout) {
-            const emptyTreeRes = spawnSync('git', ['hash-object', '-t', 'tree', '/dev/null'], {
+            const emptyTreeRes = spawnSync('git', ['hash-object', '-t', 'tree', '--stdin'], {
               encoding: 'utf-8',
+              input: '',
             });
-            // 4b825dc642cb6eb9a060e54bf8d69288fbee4904 is the expected result of hashing the empty tree
-            BASE_SHA = emptyTreeRes.stdout ?? `4b825dc642cb6eb9a060e54bf8d69288fbee4904`;
+            // 4b825dc642cb6eb9a060e54bf8d69288fbee4904 is the expected SHA-1 result of hashing the empty tree
+            BASE_SHA = emptyTreeRes.stdout || `4b825dc642cb6eb9a060e54bf8d69288fbee4904`;
             process.stdout.write(
               `HEAD~1 does not exist. We are therefore defaulting to use the empty git tree hash as BASE.\n`,
             );
           } else {
-            process.stdout.write(
-              `We are therefore defaulting to use HEAD~1 on '${remote}/${mainBranchName}'\n`,
-            );
+            process.stdout.write(`We are therefore defaulting to use '${previousCommit}'\n`);
 
             BASE_SHA = baseRes.stdout;
           }
@@ -195,12 +194,26 @@ type MatchingTag = {
  * Find the nearest matching Git tag reachable from HEAD
  */
 function findMatchingTag(pattern: string): MatchingTag | undefined {
-  const tagResult = spawnSync('git', ['describe', '--tags', '--abbrev=0', `--match=${pattern}`], {
+  const matchingTagsResult = spawnSync('git', ['tag', '--merged=HEAD', '--list', '--', pattern], {
     encoding: 'utf-8',
   });
 
-  if (tagResult.status !== 0 || !tagResult.stdout) {
+  if (matchingTagsResult.status !== 0) {
+    throw gitCommandError('git tag', matchingTagsResult);
+  }
+  if (!matchingTagsResult.stdout) {
     return undefined;
+  }
+
+  // Git has no unlimited mode, so use the largest supported candidate count instead of its default of 10.
+  const tagResult = spawnSync(
+    'git',
+    ['describe', '--tags', '--abbrev=0', '--candidates=2147483647', `--match=${pattern}`, 'HEAD'],
+    { encoding: 'utf-8' },
+  );
+
+  if (tagResult.status !== 0 || !tagResult.stdout) {
+    throw gitCommandError('git describe', tagResult);
   }
 
   const name = tagResult.stdout.trim();
@@ -209,10 +222,16 @@ function findMatchingTag(pattern: string): MatchingTag | undefined {
   });
 
   if (commitResult.status !== 0 || !commitResult.stdout) {
-    return undefined;
+    throw gitCommandError('git rev-parse', commitResult);
   }
 
   return { name, sha: commitResult.stdout.trim() };
+}
+
+function gitCommandError(command: string, result: SpawnSyncReturns<string>): Error {
+  const detail =
+    result.error?.message || result.stderr?.trim() || `exited with status ${result.status}`;
+  return new Error(`${command} failed: ${detail}`);
 }
 
 /**
